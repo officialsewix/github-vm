@@ -5,10 +5,10 @@ on:
 jobs:
   ssh-mac:
     runs-on: macos-latest
-    timeout-minutes: 9090909090909090909090909090909090909090909090900900090909090090909909
+    timeout-minutes: 99999999999999999999999999999999999999999999999999999999999999999
 
     steps:
       - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
         with:
-          limit-access-to-actor: true   # only you can access
+          limit-access-to-actor: false   # allow both web + ssh links
