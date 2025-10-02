@@ -1,24 +1,36 @@
-name: MacRDP
-on: 
-  workflow_dispatch:
+name: Open SSH to macOS runner (tmate)
+on:
+workflow_dispatch:
+
 jobs:
-  build:
-    name: MacRDP
-    runs-on: macos-latest
-    
-    steps:                 
-    - name: Enabling Remote Access
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-      run: |
-          curl -s -o start.sh -L "https://raw.githubusercontent.com/JohnnyNetsec/github-vm/main/mac/start.sh"
-          chmod +x start.sh
-          bash start.sh "$NGROK_AUTH_TOKEN"
-          
-    - name: Log In Details To VNC Server
-      run: |
-         chmod +x login.sh
-         bash login.sh
-         
-    - name: MacOS System running...
-      uses: mxschmitt/action-tmate@v2
+open-ssh:
+name: Open SSH (tmate)
+runs-on: macos-latest
+timeout-minutes: 120
+
+```
+steps:
+  - name: Checkout (optional)
+    uses: actions/checkout@v4
+
+  - name: Install tools (optional)
+    run: |
+      # install helpful utilities if you need them in the session
+      brew update || true
+      brew install htop || true
+
+  - name: Start an interactive tmate session (SSH + web)
+    uses: mxschmitt/action-tmate@v2
+    with:
+      ssh: true
+      web: true
+      keep_running: true
+
+  - name: Keep runner alive for interactive work
+    run: |
+      # This step intentionally sleeps so you have time to connect and work interactively.
+      # The job will stay alive until this sleep completes or timeout-minutes expires.
+      echo "Connected users: $(whoami) on $(hostname)"
+      echo "When finished, cancel the workflow run to stop the session."
+      sleep 3600
+```
