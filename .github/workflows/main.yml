@@ -1,14 +1,60 @@
-name: SSH into macOS Runner
+name: Android Emulator GUI
 on:
   workflow_dispatch:
 
 jobs:
-  ssh-mac:
-    runs-on: macos-latest
-    timeout-minutes: 99999999999999999999999999999999999999999999999999999999999999999
+  android-gui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
-      - name: Start tmate session
-        uses: mxschmitt/action-tmate@v3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils \
+                                  x11vnc xvfb fluxbox wget unzip curl
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
         with:
-          limit-access-to-actor: false   # allow both web + ssh links
+          api-level: 30
+          build-tools: 30.0.3
+          target: default
+          arch: x86_64
+          profile: pixel
+          emulator: true
+
+      - name: Create Android Emulator
+        run: |
+          yes "no" | avdmanager create avd -n test -k "system-images;android-30;default;x86_64" --force
+
+      - name: Start Xvfb + Fluxbox
+        run: |
+          Xvfb :0 -screen 0 1280x720x24 &
+          export DISPLAY=:0
+          fluxbox &
+
+      - name: Start Emulator
+        run: |
+          export DISPLAY=:0
+          nohup emulator -avd test -no-audio -no-boot-anim -gpu swiftshader_indirect &
+          adb wait-for-device
+          adb shell getprop ro.build.version.release
+
+      - name: Start VNC server
+        run: |
+          export DISPLAY=:0
+          x11vnc -display :0 -nopw -forever -listen localhost -rfbport 5900 &
+          sleep 5
+
+      - name: Start ngrok tunnel
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          curl -s https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip -o ngrok.zip
+          unzip ngrok.zip
+          ./ngrok authtoken $NGROK_AUTH_TOKEN
+          ./ngrok tcp 5900 > /dev/null &
+          sleep 10
+          curl --silent http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url'
+
