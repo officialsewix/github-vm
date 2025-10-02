@@ -1,36 +1,14 @@
-name: Open SSH to macOS runner (tmate)
+name: SSH into macOS Runner
 on:
-workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
-open-ssh:
-name: Open SSH (tmate)
-runs-on: macos-latest
-timeout-minutes: 120
+  ssh-mac:
+    runs-on: macos-latest
+    timeout-minutes: 9090909090909090909090909090909090909090909090900900090909090090909909
 
-```
-steps:
-  - name: Checkout (optional)
-    uses: actions/checkout@v4
-
-  - name: Install tools (optional)
-    run: |
-      # install helpful utilities if you need them in the session
-      brew update || true
-      brew install htop || true
-
-  - name: Start an interactive tmate session (SSH + web)
-    uses: mxschmitt/action-tmate@v2
-    with:
-      ssh: true
-      web: true
-      keep_running: true
-
-  - name: Keep runner alive for interactive work
-    run: |
-      # This step intentionally sleeps so you have time to connect and work interactively.
-      # The job will stay alive until this sleep completes or timeout-minutes expires.
-      echo "Connected users: $(whoami) on $(hostname)"
-      echo "When finished, cancel the workflow run to stop the session."
-      sleep 3600
-```
+    steps:
+      - name: Start tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true   # only you can access
