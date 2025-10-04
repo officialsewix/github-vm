@@ -1,186 +1,160 @@
 name: macos-remote-via-ngrok
 
 on:
-  workflow_dispatch:
+workflow_dispatch:
 
 jobs:
-  remote-mac:
-    runs-on: macos-latest
-    timeout-minutes: 120
+remote-mac:
+runs-on: macos-latest
+timeout-minutes: 120
+env:
+DISPLAY_GEOMETRY: "1920x1080"
+VNC_DISPLAY: ":1"
+VNC_PORT: 5901
+
+```
+steps:
+  - name: Checkout code
+    uses: actions/checkout@v4
+
+  - name: Show runner info
+    run: |
+      sw_vers
+      uname -a
+      whoami
+      echo "macOS runner info above"
+
+  - name: Install TigerVNC (Homebrew)
+    run: |
+      if ! command -v brew >/dev/null 2>&1; then
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        # try to ensure brew is on PATH for both Intel and Apple Silicon
+        if [ -d /opt/homebrew/bin ]; then
+          eval "$(/opt/homebrew/bin/brew shellenv)" || true
+        elif [ -d /usr/local/bin ]; then
+          eval "$(/usr/local/bin/brew shellenv)" || true
+        fi
+      fi
+      brew update || true
+      brew install tigervnc || true
+
+  - name: Configure VNC password
     env:
-      DISPLAY_GEOMETRY: "1920x1080"
-      VNC_DISPLAY: ":1"        # VNC display (maps to TCP port 5901)
-      VNC_PORT: 5901
+      VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+    run: |
+      if [ -z "${VNC_PASSWORD}" ]; then
+        echo "ERROR: secrets.VNC_PASSWORD is not set. Add it in repo Settings → Secrets."
+        exit 1
+      fi
+      mkdir -p ~/.vnc
+      printf "%s\n" "${VNC_PASSWORD}" "${VNC_PASSWORD}" | vncpasswd -f > ~/.vnc/passwd
+      chmod 600 ~/.vnc/passwd
+      echo "VNC password written to ~/.vnc/passwd"
 
-    steps:
-      - name: Checkout (no code required, but helpful)
-        uses: actions/checkout@v4
+  - name: Start VNC server
+    run: |
+      # Kill any existing VNC instances for cleanliness
+      vncserver -kill ${VNC_DISPLAY} >/dev/null 2>&1 || true
+      # Start a new VNC server on display :1 (TCP 5901)
+      vncserver ${VNC_DISPLAY} -geometry ${DISPLAY_GEOMETRY} -depth 24 || true
+      sleep 2
+      ps aux | grep Xtigervnc || true
 
-      - name: Show runner info
-        run: |
-          sw_vers
-          uname -a
-          whoami
-          echo "macOS runner info above"
+  - name: Install ngrok (fallback to download if brew not available)
+    run: |
+      if command -v brew >/dev/null 2>&1; then
+        # Try to install ngrok via Homebrew; if cask fails try formula
+        brew install --cask ngrok || brew install ngrok || true
+      fi
 
-      ################################################################
-      # INSTALL & START TIGERVNC (virtual framebuffer VNC server)
-      # This tends to work better on headless macOS runners than trying
-      # to enable Apple Screen Sharing or TeamViewer GUI which often
-      # require interactive approval.
-      ################################################################
-      - name: Install TigerVNC
-        run: |
-          # Homebrew usually exists on macOS runners. If not, attempt install.
-          if ! command -v brew >/dev/null 2>&1; then
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            eval "$(/opt/homebrew/bin/brew shellenv)" || true
-          fi
+      if ! command -v ngrok >/dev/null 2>&1; then
+        TMPDIR="$(mktemp -d)"
+        cd "$TMPDIR"
+        # download official macOS amd64 build (fallback)
+        curl -sS -L -o ngrok.zip "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-darwin-amd64.zip"
+        unzip -q ngrok.zip
+        chmod +x ngrok
+        sudo mv ngrok /usr/local/bin/ || sudo mv ngrok /opt/homebrew/bin/ || true
+      fi
 
-          brew update || true
-          brew install tigervnc || true
+      echo "ngrok: $(command -v ngrok || echo 'not found')"
 
-      - name: Configure VNC password (from repo secret)
-        env:
-          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
-        run: |
-          if [ -z "${VNC_PASSWORD}" ]; then
-            echo "ERROR: secrets.VNC_PASSWORD is not set. Add it in repo Settings → Secrets."
-            exit 1
-          fi
-          mkdir -p ~/.vnc
-          # TigerVNC's vncpasswd -f reads the password from stdin and outputs the hashed file content
-          printf "%s\n" "${VNC_PASSWORD}" "${VNC_PASSWORD}" | vncpasswd -f > ~/.vnc/passwd
-          chmod 600 ~/.vnc/passwd
-          echo "VNC password written to ~/.vnc/passwd"
+  - name: Authenticate ngrok & start TCP tunnel
+    env:
+      NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+    run: |
+      if [ -z "${NGROK_AUTHTOKEN}" ]; then
+        echo "ERROR: secrets.NGROK_AUTHTOKEN is not set. Add it in repo Settings → Secrets."
+        exit 1
+      fi
 
-      - name: Start VNC server (virtual)
-        run: |
-          # Kill any existing VNC instances for cleanliness
-          vncserver -kill ${VNC_DISPLAY} >/dev/null 2>&1 || true
-          # Start a new VNC server on display :1 (TCP 5901)
-          vncserver ${VNC_DISPLAY} -geometry ${DISPLAY_GEOMETRY} -depth 24
-          sleep 2
-          ps aux | grep Xtigervnc || true
+      ngrok authtoken "${NGROK_AUTHTOKEN}" || true
 
-      ################################################################
-      # INSTALL NGROK, AUTH, AND START A TCP TUNNEL FOR THE VNC PORT
-      # We run ngrok in the background and query the local ngrok API to
-      # extract the public TCP address. The public address is written to
-      # the GitHub job summary for easy copy/paste.
-      ################################################################
-      - name: Install ngrok (download official binary)
-        run: |
-          NGROK_VER="4.0.0" # generic; if this fails you can change or install via brew
-          # prefer brew if available
-          if command -v brew >/dev/null 2>&1 && brew info --cask ngrok >/dev/null 2>&1; then
-            brew install --cask ngrok || true
-            NGROK_BIN="/usr/local/bin/ngrok"
-            if [ ! -f "${NGROK_BIN}" ]; then
-              NGROK_BIN="/opt/homebrew/bin/ngrok"
-            fi
-          else
-            # fallback: download ngrok
-            TMPDIR="$(mktemp -d)"
-            cd $TMPDIR
-            # choose macOS amd64 zip
-            curl -sS -L -o ngrok.zip "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-darwin-amd64.zip"
-            unzip -q ngrok.zip
-            chmod +x ngrok
-            sudo mv ngrok /usr/local/bin/ngrok || sudo mv ngrok /opt/homebrew/bin/ngrok || true
-            NGROK_BIN="$(command -v ngrok || true)"
-          fi
-          echo "ngrok binary: $(which ngrok || echo 'not found')"
+      # start tcp tunnel for VNC port in background
+      nohup ngrok tcp ${VNC_PORT} --log=stdout > ngrok.log 2>&1 &
 
-      - name: Authenticate ngrok & start TCP tunnel
-        env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
-        run: |
-          if [ -z "${NGROK_AUTHTOKEN}" ]; then
-            echo "ERROR: secrets.NGROK_AUTHTOKEN is not set. Add it in repo Settings → Secrets."
-            exit 1
-          fi
+      # wait for ngrok local API to be available
+      for i in $(seq 1 20); do
+        sleep 1
+        if curl --silent --fail http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1; then
+          break
+        fi
+      done
 
-          # configure authtoken (creates ~/.ngrok2/ngrok.yml)
-          ngrok authtoken "${NGROK_AUTHTOKEN}" || true
+      TUNNELS_JSON="$(curl -s http://127.0.0.1:4040/api/tunnels || true)"
+      echo "ngrok tunnels: $TUNNELS_JSON"
 
-          # start tcp tunnel for VNC port; run in background and capture logs
-          nohup ngrok tcp ${VNC_PORT} --log=stdout > ngrok.log 2>&1 &
+      PUBLIC_TCP="$(echo "$TUNNELS_JSON" | python3 - <<'PY'
+```
 
-          # wait for ngrok to initialize and expose the API at 127.0.0.1:4040
-          for i in $(seq 1 20); do
-            sleep 1
-            if curl --silent --fail http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1; then
-              break
-            fi
-          done
-
-          # fetch the public tcp endpoint from ngrok API
-          TUNNELS_JSON="$(curl -s http://127.0.0.1:4040/api/tunnels || true)"
-          echo "ngrok tunnels: $TUNNELS_JSON"
-          PUBLIC_TCP="$(echo "$TUNNELS_JSON" | /usr/bin/python3 - <<'PY'
 import sys, json
-s=sys.stdin.read()
+s = sys.stdin.read()
 try:
-  j=json.loads(s)
-  for t in j.get("tunnels",[]):
-    if t.get("proto")=="tcp":
-      print(t.get("public_url"))
-      sys.exit(0)
+j = json.loads(s or "{}")
+for t in j.get("tunnels", []):
+if t.get("proto") == "tcp":
+print(t.get("public_url"))
+break
 except Exception:
-  pass
+pass
 PY
 )"
-          if [ -z "$PUBLIC_TCP" ]; then
-            echo "ERROR: could not get public ngrok tcp url (see ngrok.log)"
-            tail -n +1 ngrok.log || true
-            exit 1
-          fi
 
-          echo "Public VNC (ngrok tcp) address: $PUBLIC_TCP"
-          echo "To connect with a VNC client: connect to host and port shown by ngrok."
-          # add to GitHub step summary so you can click it from actions UI
-          echo "## Remote access info" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- VNC (TigerVNC) via ngrok: ${PUBLIC_TCP}" >> $GITHUB_STEP_SUMMARY
-          echo "- VNC password: (the one in repo secret VNC_PASSWORD)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "If you prefer TeamViewer, see the experimental TeamViewer step below."
+```
+      if [ -z "${PUBLIC_TCP}" ]; then
+        echo "ERROR: could not get public ngrok tcp url (see ngrok.log)"
+        tail -n +1 ngrok.log || true
+        exit 1
+      fi
 
-      ################################################################
-      # OPTIONAL: Attempt to install TeamViewer (experimental)
-      # - This step is likely to fail on hosted macOS runners without
-      #   interactive approval or a signed GUI session. Keep it but
-      #   don't expect it to be reliable. It's here for experimentation.
-      ################################################################
-      - name: (Optional) Attempt to install TeamViewer (experimental)
-        if: ${{ always() }}
-        run: |
-          echo "Attempting TeamViewer install (may require interactive approval / fail on GitHub runners)"
-          # Install via Homebrew cask if available
-          brew install --cask teamviewer || true
-          # remove quarantine attribute (may help)
-          sudo xattr -dr com.apple.quarantine /Applications/TeamViewer.app || true
-          # try to open TeamViewer (this may or may not start in the background)
-          open -a TeamViewer || true
-          sleep 8
-          # Try to run TeamViewer CLI (if available)
-          if command -v teamviewer >/dev/null 2>&1; then
-            echo "TeamViewer CLI found: $(teamviewer --version 2>/dev/null || true)"
-            # try to enable headless daemon mode (may not be supported)
-            teamviewer --daemon enable || true
-            teamviewer --info || true
-          else
-            echo "TeamViewer CLI not available or failed to launch."
-          fi
-          echo "Note: TeamViewer usually requires interactive GUI permissions, licensing, and/or manual approval. This step is experimental."
+      echo "Public VNC (ngrok tcp) address: ${PUBLIC_TCP}"
+      echo "## Remote access info" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+      echo "- VNC (TigerVNC) via ngrok: ${PUBLIC_TCP}" >> "$GITHUB_STEP_SUMMARY"
+      echo "- VNC password: (the one in repo secret VNC_PASSWORD)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep job alive (long-lived session)
-        # This step keeps the runner alive so you can connect.
-        # Adjust sleep value as you want; workflow will be killed when job times out.
-        run: |
-          echo "Runner will sleep to keep VNC+ngrok alive. When finished, cancel the workflow from the Actions UI."
-          # Display the ngrok log in the background (helpful for debugging)
-          tail -f ngrok.log &
-          # Sleep for a long time (2 hours maximum per job; timeout-minutes set on job)
-          sleep 7200
+  - name: Optional: Attempt to install TeamViewer (experimental)
+    if: ${{ always() }}
+    run: |
+      echo "Attempting TeamViewer install (may require interactive approval / fail on GitHub runners)"
+      if command -v brew >/dev/null 2>&1; then
+        brew install --cask teamviewer || true
+      fi
+      sudo xattr -dr com.apple.quarantine /Applications/TeamViewer.app || true
+      open -a TeamViewer || true
+      sleep 8
+      if command -v teamviewer >/dev/null 2>&1; then
+        echo "TeamViewer CLI found: $(teamviewer --version 2>/dev/null || true)"
+        teamviewer --daemon enable || true
+        teamviewer --info || true
+      else
+        echo "TeamViewer CLI not available or failed to launch."
+      fi
+
+  - name: Keep job alive (tail ngrok log)
+    run: |
+      echo "Runner will sleep to keep VNC+ngrok alive. Cancel the workflow when finished."
+      tail -f ngrok.log & pid="$!"
+      sleep 7200 || true
+      kill "$pid" || true
+```
