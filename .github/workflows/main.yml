@@ -1,87 +1,80 @@
 name: macos-remote-via-ngrok
 
-on:
-workflow_dispatch:
+on: [push, workflow_dispatch]
 
 jobs:
 remote:
 runs-on: macos-latest
 timeout-minutes: 120
-env:
-DISPLAY_GEOMETRY: "1280x800"
-VNC_DISPLAY: ":1"
-VNC_PORT: 5901
 
-```
 steps:
-  - name: Checkout
-    uses: actions/checkout@v4
+- name: Checkout
+  uses: actions/checkout@v4
 
-  - name: Install deps (Homebrew, TigerVNC, ngrok)
-    run: |
-      set -e
-      if ! command -v brew >/dev/null 2>&1; then
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-        if [ -d /opt/homebrew/bin ]; then
-          eval "$(/opt/homebrew/bin/brew shellenv)"
-        else
-          eval "$(/usr/local/bin/brew shellenv || true)"
-        fi
+- name: Install Homebrew (if missing)
+  run: |
+    if ! command -v brew >/dev/null 2>&1; then
+      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      if [ -d /opt/homebrew/bin ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+      else
+        eval "$(/usr/local/bin/brew shellenv)" || true
       fi
-      brew update || true
-      brew install tigervnc || true
-      brew install --cask ngrok || brew install ngrok || true
+    fi
 
-  - name: Configure VNC password
-    env:
-      VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
-    run: |
-      if [ -z "${VNC_PASSWORD:-}" ]; then
-        echo "ERROR: set secrets.VNC_PASSWORD" >&2; exit 1
-      fi
-      mkdir -p ~/.vnc
-      printf "%s\n%s\n" "${VNC_PASSWORD}" "${VNC_PASSWORD}" | vncpasswd -f > ~/.vnc/passwd
-      chmod 600 ~/.vnc/passwd
+- name: Install TigerVNC & ngrok
+  run: |
+    brew update || true
+    brew install tigervnc || true
+    brew install --cask ngrok || brew install ngrok || true
 
-  - name: Start VNC server
-    run: |
-      vncserver -kill ${VNC_DISPLAY} >/dev/null 2>&1 || true
-      vncserver ${VNC_DISPLAY} -geometry ${DISPLAY_GEOMETRY} -depth 24 || true
-      sleep 2
+- name: Configure VNC password
+  env:
+    VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+  run: |
+    if [ -z "${VNC_PASSWORD:-}" ]; then
+      echo "Missing VNC_PASSWORD secret" >&2; exit 1
+    fi
+    mkdir -p ~/.vnc
+    printf "%s\n%s\n" "${VNC_PASSWORD}" "${VNC_PASSWORD}" | vncpasswd -f > ~/.vnc/passwd
+    chmod 600 ~/.vnc/passwd
 
-  - name: Start ngrok TCP tunnel for VNC
-    env:
-      NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
-    run: |
-      if [ -z "${NGROK_AUTHTOKEN:-}" ]; then
-        echo "ERROR: set secrets.NGROK_AUTHTOKEN" >&2; exit 1
-      fi
-      ngrok authtoken "${NGROK_AUTHTOKEN}" || true
-      nohup ngrok tcp ${VNC_PORT} --log=stdout > ngrok.log 2>&1 &
-      for i in 1 2 3 4 5 6 7 8 9 10; do
-        sleep 1
-        curl -s http://127.0.0.1:4040/api/tunnels | grep -q '"proto":"tcp"' && break || true
-      done
-      url=$(curl -s http://127.0.0.1:4040/api/tunnels | python3 - <<'PY'
+- name: Start VNC server
+  run: |
+    vncserver -kill :1 >/dev/null 2>&1 || true
+    vncserver :1 -geometry 1280x800 -depth 24 || true
+    sleep 2
+
+- name: Auth ngrok & start TCP tunnel
+  env:
+    NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+  run: |
+    if [ -z "${NGROK_AUTH_TOKEN:-}" ]; then
+      echo "Missing NGROK_AUTH_TOKEN secret" >&2; exit 1
+    fi
+    ngrok authtoken "${NGROK_AUTH_TOKEN}" || true
+    nohup ngrok tcp 5901 --log=stdout > ngrok.log 2>&1 &
+    for i in 1 2 3 4 5 6 7 8 9 10; do sleep 1; curl -s http://127.0.0.1:4040/api/tunnels | grep -q '"proto":"tcp"' && break || true; done
+    curl -s http://127.0.0.1:4040/api/tunnels | python3 - <<'PY'
 ```
 
-import sys,json
+import sys, json
 s=sys.stdin.read()
 try:
 j=json.loads(s or '{}')
-for t in j.get('tunnels',[]):
-if t.get('proto')=='tcp':
+for t in j.get('tunnels', []):
+if t.get('proto') == 'tcp':
 print(t.get('public_url'))
 break
-except: pass
+except:
+pass
 PY
-)
-echo "ngrok: ${url}"
-echo "- ngrok tcp: ${url}" >> "$GITHUB_STEP_SUMMARY"
-echo "- VNC password stored in repo secret VNC_PASSWORD" >> "$GITHUB_STEP_SUMMARY"
+echo "" >> "$GITHUB_STEP_SUMMARY"
+echo "- VNC (ngrok): see workflow log above" >> "$GITHUB_STEP_SUMMARY"
+echo "- VNC password stored in secret VNC_PASSWORD" >> "$GITHUB_STEP_SUMMARY"
 
 ```
-  - name: Keep job alive (tail ngrok log)
-    run: |
-      tail -f ngrok.log & sleep 7200 || true
+- name: Keep job alive
+  run: |
+    tail -f ngrok.log & sleep 7200 || true
 ```
